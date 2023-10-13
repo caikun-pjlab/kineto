@@ -14,20 +14,26 @@ class ActivityLogger;
 
 class DeviceActivityInterface {
  public:
+  enum CorrelationFlowType {
+    Default,
+    User,
+    End,
+  };
+
   virtual ~DeviceActivityInterface() {}
 
-  virtual void pushCorrelationID(uint64_t id, int32_t type) = 0;
-  virtual void popCorrelationID(int32_t type) = 0;
+  virtual void pushCorrelationID(uint64_t id, CorrelationFlowType type) = 0;
+  virtual void popCorrelationID(CorrelationFlowType type) = 0;
 
-  virtual void enableActivities(const std::set<ActivityType>& selected_activities) = 0;
-  virtual void disableActivities(const std::set<ActivityType>& selected_activities) = 0;
+  virtual void enableActivities(const std::set<ActivityType>& selectedActivities) = 0;
+  virtual void disableActivities(const std::set<ActivityType>& selectedActivities) = 0;
   virtual void clearActivities() = 0;
   virtual void teardownContext() = 0;
   virtual void setMaxBufferSize(int32_t size) = 0;
 
   virtual int32_t processActivities(ActivityLogger& logger,
-                                    std::function<const ITraceActivity*(int32_t)> linked_activity,
-                                    int64_t start_time, int64_t end_time) = 0;
+                                    std::function<const ITraceActivity*(int32_t)> linkedActivity,
+                                    int64_t startTime, int64_t endTime) = 0;
 
  public:
   std::atomic_bool stopCollection{false};
