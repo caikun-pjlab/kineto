@@ -25,6 +25,8 @@ endfunction()
 
 project(kineto VERSION 0.1 LANGUAGES CXX C)
 
+add_compile_options(-fPIC)
+
 set(KINETO_LIBRARY_TYPE "default" CACHE STRING
   "Type of library (default, static or shared) to build")
 set_property(CACHE KINETO_LIBRARY_TYPE PROPERTY STRINGS default shared)

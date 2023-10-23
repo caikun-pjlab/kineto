@@ -839,9 +839,7 @@ void CuptiActivityProfiler::configure(
     // are activated etc. After a while the overhead decreases and stabilizes.
     // It's therefore useful to perform some warmup before starting recording.
     LOG(INFO) << "Enabling GPU tracing";
-#ifndef HAS_DEVICE_ACTIVITY
     cupti_.setMaxBufferSize(config_->activitiesMaxGpuBufferSize());
-#endif
     time_point<system_clock> timestamp;
     if (VLOG_IS_ON(1)) {
       timestamp = system_clock::now();
