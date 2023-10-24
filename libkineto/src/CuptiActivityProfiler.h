@@ -43,6 +43,7 @@ namespace KINETO_NAMESPACE {
 class Config;
 class CuptiActivityApi;
 class RoctracerActivityApi;
+class DeviceActivityInterface;
 
 // This struct is a derived snapshot of the Config. And should not
 // be mutable after construction.
@@ -107,6 +108,7 @@ class CuptiActivityProfiler {
  public:
   CuptiActivityProfiler(CuptiActivityApi& cupti, bool cpuOnly);
   CuptiActivityProfiler(RoctracerActivityApi& rai, bool cpuOnly);
+  CuptiActivityProfiler(DeviceActivityInterface& deviceActivityApi, bool cpuOnly);
   CuptiActivityProfiler(const CuptiActivityProfiler&) = delete;
   CuptiActivityProfiler& operator=(const CuptiActivityProfiler&) = delete;
 
@@ -345,6 +347,8 @@ class CuptiActivityProfiler {
   // Calls to CUPTI is encapsulated behind this interface
 #ifdef HAS_ROCTRACER
   RoctracerActivityApi& cupti_;		// Design failure here
+#elif HAS_DEVICE_ACTIVITY
+  DeviceActivityInterface& cupti_;
 #else
   CuptiActivityApi& cupti_;
 #endif
