@@ -16,6 +16,9 @@
 #ifdef HAS_ROCTRACER
 #include "RoctracerActivityApi.h"
 #endif
+#ifdef HAS_DEVICE_ACTIVITY
+#include "DeviceActivityInterface.h"
+#endif
 
 namespace KINETO_NAMESPACE {
 
@@ -99,6 +102,10 @@ void ActivityProfilerProxy::pushCorrelationId(uint64_t id) {
   RoctracerActivityApi::pushCorrelationID(id,
     RoctracerActivityApi::CorrelationFlowType::Default);
 #endif
+#ifdef HAS_DEVICE_ACTIVITY
+  device_activity_singleton->pushCorrelationID(id,
+    DeviceActivityInterface::CorrelationFlowType::Default);
+#endif
 }
 
 void ActivityProfilerProxy::popCorrelationId() {
@@ -108,16 +115,28 @@ void ActivityProfilerProxy::popCorrelationId() {
   RoctracerActivityApi::popCorrelationID(
     RoctracerActivityApi::CorrelationFlowType::Default);
 #endif
+#ifdef HAS_DEVICE_ACTIVITY
+  device_activity_singleton->popCorrelationID(
+    DeviceActivityInterface::CorrelationFlowType::Default);
+#endif
 }
 
 void ActivityProfilerProxy::pushUserCorrelationId(uint64_t id) {
   CuptiActivityApi::pushCorrelationID(id,
     CuptiActivityApi::CorrelationFlowType::User);
+#ifdef HAS_DEVICE_ACTIVITY
+  device_activity_singleton->pushCorrelationID(id,
+    DeviceActivityInterface::CorrelationFlowType::User);
+#endif
 }
 
 void ActivityProfilerProxy::popUserCorrelationId() {
   CuptiActivityApi::popCorrelationID(
     CuptiActivityApi::CorrelationFlowType::User);
+#ifdef HAS_DEVICE_ACTIVITY
+  device_activity_singleton->popCorrelationID(
+    DeviceActivityInterface::CorrelationFlowType::User);
+#endif
 }
 
 void ActivityProfilerProxy::transferCpuTrace(
