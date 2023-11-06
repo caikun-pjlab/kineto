@@ -27,15 +27,17 @@ project(kineto VERSION 0.1 LANGUAGES CXX C)
 
 add_compile_options(-fPIC)
 
-execute_process(
-  COMMAND
-    sh -x -c
-    "python -c 'import torch;print(1 if torch.compiled_with_cxx11_abi() else 0)'"
-  OUTPUT_VARIABLE KINETO_COMPILED_WITH_CXX11_ABI)
-if(KINETO_COMPILED_WITH_CXX11_ABI GREATER 0)
-  set(KINETO_COMPILED_WITH_CXX11_ABI 1)
-else()
-  set(KINETO_COMPILED_WITH_CXX11_ABI 0)
+if(NOT DEFINED KINETO_COMPILED_WITH_CXX11_ABI)
+  execute_process(
+    COMMAND
+      sh -x -c
+      "python -c 'import torch;print(1 if torch.compiled_with_cxx11_abi() else 0)'"
+    OUTPUT_VARIABLE KINETO_COMPILED_WITH_CXX11_ABI)
+  if(KINETO_COMPILED_WITH_CXX11_ABI GREATER 0)
+    set(KINETO_COMPILED_WITH_CXX11_ABI 1)
+  else()
+    set(KINETO_COMPILED_WITH_CXX11_ABI 0)
+  endif()
 endif()
 set(CMAKE_CXX_FLAGS
     "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=${KINETO_COMPILED_WITH_CXX11_ABI}"
