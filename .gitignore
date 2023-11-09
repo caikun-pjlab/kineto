@@ -1,3 +1,5 @@
 # ignore common items
 .idea
 .vscode
+build/
+build*
