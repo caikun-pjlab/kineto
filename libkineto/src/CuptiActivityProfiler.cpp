@@ -701,6 +701,10 @@ void CuptiActivityProfiler::startTraceInternal(
     session->start();
   }
   currentRunloopState_ = RunloopState::CollectTrace;
+
+#ifdef HAS_DEVICE_ACTIVITY
+  cupti_.startTrace(derivedConfig_->profileActivityTypes());
+#endif
 }
 
 void CuptiActivityProfiler::stopTraceInternal(
@@ -716,6 +720,9 @@ void CuptiActivityProfiler::stopTraceInternal(
     cupti_.disableCuptiActivities(derivedConfig_->profileActivityTypes());
 #else
     cupti_.disableActivities(derivedConfig_->profileActivityTypes());
+#endif
+#ifdef HAS_DEVICE_ACTIVITY
+  cupti_.stopTrace(derivedConfig_->profileActivityTypes());
 #endif
     if (VLOG_IS_ON(1)) {
       auto t2 = system_clock::now();

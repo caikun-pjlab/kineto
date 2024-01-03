@@ -28,6 +28,9 @@ class DeviceActivityInterface {
   virtual void enableActivities(const std::set<ActivityType>& selectedActivities) = 0;
   virtual void disableActivities(const std::set<ActivityType>& selectedActivities) = 0;
   virtual void clearActivities() = 0;
+
+  virtual void startTrace(const std::set<ActivityType>& selectedActivities) = 0;
+  virtual void stopTrace(const std::set<ActivityType>& selectedActivities) = 0;
   virtual void teardownContext() = 0;
   virtual void setMaxBufferSize(int32_t size) = 0;
 
