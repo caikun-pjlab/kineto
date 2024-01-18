@@ -103,9 +103,12 @@ void CuptiCallbackApi::__callback_switchboard(
       // This is required to teardown cupti after profiling to prevent QPS slowdown.
       if (CuptiActivityApi::singleton().teardownCupti_) {
         if (cbInfo->callbackSite == CUPTI_API_EXIT) {
+          LOG(INFO) << "  Calling cuptiFinalize in exit callsite";
           // Teardown CUPTI calling cuptiFinalize()
+          CUPTI_CALL(cuptiUnsubscribe(subscriber_));
           CUPTI_CALL(cuptiFinalize());
           initSuccess_ = false;
+          subscriber_ = 0;
           CuptiActivityApi::singleton().teardownCupti_ = 0;
           CuptiActivityApi::singleton().finalizeCond_.notify_all();
           return;
@@ -175,6 +178,9 @@ void CuptiCallbackApi::initCallbackApi() {
     cuptiSubscribe(&subscriber_,
       (CUpti_CallbackFunc)callback_switchboard,
       nullptr));
+  if (lastCuptiStatus_ != CUPTI_SUCCESS) {
+    VLOG(1)  << "Failed cuptiSubscribe, status: " << lastCuptiStatus_;
+  }
 
   initSuccess_ = (lastCuptiStatus_ == CUPTI_SUCCESS);
 #endif
@@ -277,10 +283,10 @@ bool CuptiCallbackApi::enableCallback(
 bool CuptiCallbackApi::disableCallback(
     CUpti_CallbackDomain domain, CUpti_CallbackId cbid) {
 #ifdef HAS_CUPTI
+  enabledCallbacks_.erase({domain, cbid});
   if (initSuccess_) {
     lastCuptiStatus_ = CUPTI_CALL_NOWARN(
         cuptiEnableCallback(0, subscriber_, domain, cbid));
-    enabledCallbacks_.erase({domain, cbid});
     return (lastCuptiStatus_ == CUPTI_SUCCESS);
   }
 #endif
@@ -303,10 +309,10 @@ bool CuptiCallbackApi::enableCallbackDomain(
 bool CuptiCallbackApi::disableCallbackDomain(
     CUpti_CallbackDomain domain) {
 #ifdef HAS_CUPTI
+  enabledCallbacks_.erase({domain, MAX_CUPTI_CALLBACK_ID_ALL});
   if (initSuccess_) {
     lastCuptiStatus_ = CUPTI_CALL_NOWARN(
         cuptiEnableDomain(0, subscriber_, domain));
-    enabledCallbacks_.erase({domain, MAX_CUPTI_CALLBACK_ID_ALL});
     return (lastCuptiStatus_ == CUPTI_SUCCESS);
   }
 #endif

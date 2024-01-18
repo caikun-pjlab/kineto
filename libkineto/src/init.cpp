@@ -31,13 +31,18 @@ namespace KINETO_NAMESPACE {
 static bool initialized = false;
 static std::mutex initMutex;
 
+bool enableEventProfiler() {
+  if (getenv("KINETO_ENABLE_EVENT_PROFILER") != nullptr) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 static void initProfilers(
     CUpti_CallbackDomain /*domain*/,
     CUpti_CallbackId /*cbid*/,
     const CUpti_CallbackData* cbInfo) {
-  CUpti_ResourceData* d = (CUpti_ResourceData*)cbInfo;
-  CUcontext ctx = d->context;
-
   VLOG(0) << "CUDA Context created";
   std::lock_guard<std::mutex> lock(initMutex);
 
@@ -46,15 +51,19 @@ static void initProfilers(
     initialized = true;
     VLOG(0) << "libkineto profilers activated";
   }
-  if (getenv("KINETO_DISABLE_EVENT_PROFILER") != nullptr) {
-    LOG(INFO) << "Kineto EventProfiler disabled via env var, skipping start";
+
+  if (!enableEventProfiler()) {
+    VLOG(0) << "Kineto EventProfiler disabled, skipping start";
+    return;
   } else {
+    CUpti_ResourceData* d = (CUpti_ResourceData*)cbInfo;
+    CUcontext ctx = d->context;
     ConfigLoader& config_loader = libkineto::api().configLoader();
     config_loader.initBaseConfig();
     auto config = config_loader.getConfigCopy();
     if (config->eventProfilerEnabled()) {
       EventProfilerController::start(ctx, config_loader);
-      LOG(INFO) << "EventProfiler started";
+      LOG(INFO) << "Kineto EventProfiler started";
     }
   }
 }
@@ -76,12 +85,15 @@ static void stopProfiler(
     CUpti_CallbackDomain /*domain*/,
     CUpti_CallbackId /*cbid*/,
     const CUpti_CallbackData* cbInfo) {
-  CUpti_ResourceData* d = (CUpti_ResourceData*)cbInfo;
-  CUcontext ctx = d->context;
-
   VLOG(0) << "CUDA Context destroyed";
   std::lock_guard<std::mutex> lock(initMutex);
-  EventProfilerController::stopIfEnabled(ctx);
+
+  if (enableEventProfiler()) {
+    CUpti_ResourceData* d = (CUpti_ResourceData*)cbInfo;
+    CUcontext ctx = d->context;
+    EventProfilerController::stopIfEnabled(ctx);
+    LOG(INFO) << "Kineto EventProfiler stopped";
+  }
 }
 
 static std::unique_ptr<CuptiRangeProfilerInit> rangeProfilerInit;
@@ -98,11 +110,8 @@ void libkineto_init(bool cpuOnly, bool logOnError) {
   // Start with initializing the log level
   const char* logLevelEnv = getenv("KINETO_LOG_LEVEL");
   if (logLevelEnv) {
-    // TODO CXX 17 - https://github.com/pytorch/kineto/issues/650
-#if __cplusplus >= 201703L
     // atoi returns 0 on error, so that's what we want - default to VERBOSE
-    static_assert (static_cast<int>(VERBOSE) == 0);
-#endif
+    static_assert (static_cast<int>(VERBOSE) == 0, "");
     SET_LOG_SEVERITY_LEVEL(atoi(logLevelEnv));
   }
 
@@ -156,8 +165,6 @@ void libkineto_init(bool cpuOnly, bool logOnError) {
       rangeProfilerInit = std::make_unique<CuptiRangeProfilerInit>();
     }
   }
-
-  CuptiActivityApi::preConfigureCUPTI();
 
   if (shouldPreloadCuptiInstrumentation()) {
     CuptiActivityApi::forceLoadCupti();

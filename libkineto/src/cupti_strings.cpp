@@ -493,6 +493,46 @@ static const char* runtimeCbidNames[] = {
     "cudaGraphExternalSemaphoresWaitNodeSetParams",
     "cudaGraphExecExternalSemaphoresSignalNodeSetParams",
     "cudaGraphExecExternalSemaphoresWaitNodeSetParams",
+    "cudaDeviceFlushGPUDirectRDMAWrites",
+    "cudaGetDriverEntryPoint",
+    "cudaGetDriverEntryPoint_ptsz",
+    "cudaGraphDebugDotPrint",
+    "cudaStreamGetCaptureInfo_v2",
+    "cudaStreamGetCaptureInfo_v2_ptsz",
+    "cudaStreamUpdateCaptureDependencies",
+    "cudaStreamUpdateCaptureDependencies_ptsz",
+    "cudaUserObjectCreate",
+    "cudaUserObjectRetain",
+    "cudaUserObjectRelease",
+    "cudaGraphRetainUserObject",
+    "cudaGraphReleaseUserObject",
+    "cudaGraphInstantiateWithFlags",
+    "cudaGraphAddMemAllocNode",
+    "cudaGraphMemAllocNodeGetParams",
+    "cudaGraphAddMemFreeNode",
+    "cudaGraphMemFreeNodeGetParams",
+    "cudaDeviceGraphMemTrim",
+    "cudaDeviceGetGraphMemAttribute",
+    "cudaDeviceSetGraphMemAttribute",
+    "cudaGraphNodeSetEnabled",
+    "cudaGraphNodeGetEnabled",
+    "cudaArrayGetMemoryRequirements",
+    "cudaMipmappedArrayGetMemoryRequirements",
+    "cudaLaunchKernelExC",
+    "cudaLaunchKernelExC_ptsz",
+    "cudaOccupancyMaxPotentialClusterSize",
+    "cudaOccupancyMaxActiveClusters",
+    "cudaCreateTextureObject_v2",
+    "cudaGetTextureObjectTextureDesc_v2",
+    "cudaGraphInstantiateWithParams",
+    "cudaGraphInstantiateWithParams_ptsz",
+    "cudaGraphExecGetFlags",
+    "cuda439",
+    "cudaGetDeviceProperties_v2",
+    "cudaStreamGetId",
+    "cudaStreamGetId_ptsz",
+    "cudaGraphInstantiate",
+    "cuda444",
     "SIZE"
 };
 
@@ -505,4 +545,23 @@ const char* runtimeCbidName(CUpti_CallbackId cbid) {
   return runtimeCbidNames[cbid];
 }
 
+// From https://docs.nvidia.com/cupti/modules.html#group__CUPTI__ACTIVITY__API_1g80e1eb47615e31021f574df8ebbe5d9a
+//   enum CUpti_ActivitySynchronizationType
+const char* syncTypeString(
+    CUpti_ActivitySynchronizationType kind) {
+  switch (kind) {
+    case CUPTI_ACTIVITY_SYNCHRONIZATION_TYPE_EVENT_SYNCHRONIZE:
+      return "Event Sync";
+    case CUPTI_ACTIVITY_SYNCHRONIZATION_TYPE_STREAM_WAIT_EVENT:
+      return "Stream Wait Event";
+    case CUPTI_ACTIVITY_SYNCHRONIZATION_TYPE_STREAM_SYNCHRONIZE:
+      return "Stream Sync";
+    case CUPTI_ACTIVITY_SYNCHRONIZATION_TYPE_CONTEXT_SYNCHRONIZE:
+      return "Context Sync";
+    case CUPTI_ACTIVITY_SYNCHRONIZATION_TYPE_UNKNOWN:
+    default:
+      return "Unknown Sync";
+  }
+  return "<unknown>";
+}
 } // namespace libkineto

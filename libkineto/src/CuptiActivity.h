@@ -77,6 +77,26 @@ struct RuntimeActivity : public CuptiActivity<CUpti_ActivityAPI> {
   const int32_t threadId_;
 };
 
+// CUpti_ActivityAPI - CUDA driver activities
+struct DriverActivity : public CuptiActivity<CUpti_ActivityAPI> {
+  explicit DriverActivity(
+      const CUpti_ActivityAPI* activity,
+      const ITraceActivity* linked,
+      int32_t threadId)
+      : CuptiActivity(activity, linked), threadId_(threadId) {}
+  int64_t correlationId() const override {return activity_.correlationId;}
+  int64_t deviceId() const override {return processId();}
+  int64_t resourceId() const override {return threadId_;}
+  ActivityType type() const override {return ActivityType::CUDA_DRIVER;}
+  bool flowStart() const override;
+  const std::string name() const override;
+  void log(ActivityLogger& logger) const override;
+  const std::string metadataJson() const override;
+
+ private:
+  const int32_t threadId_;
+};
+
 // CUpti_ActivityAPI - CUDA runtime activities
 struct OverheadActivity : public CuptiActivity<CUpti_ActivityOverhead> {
   explicit OverheadActivity(
@@ -103,6 +123,28 @@ struct OverheadActivity : public CuptiActivity<CUpti_ActivityOverhead> {
  private:
   const int32_t threadId_;
 };
+
+// CUpti_ActivitySynchronization - CUDA synchronization events
+struct CudaSyncActivity : public CuptiActivity<CUpti_ActivitySynchronization> {
+  explicit CudaSyncActivity(
+      const CUpti_ActivitySynchronization* activity,
+      const ITraceActivity* linked,
+      int32_t srcStream)
+      : CuptiActivity(activity, linked), srcStream_(srcStream) {}
+  int64_t correlationId() const override {return raw().correlationId;}
+  int64_t deviceId() const override;
+  int64_t resourceId() const override;
+  ActivityType type() const override {return ActivityType::CUDA_SYNC;}
+  bool flowStart() const override {return false;}
+  const std::string name() const override;
+  void log(ActivityLogger& logger) const override;
+  const std::string metadataJson() const override;
+  const CUpti_ActivitySynchronization& raw() const {return CuptiActivity<CUpti_ActivitySynchronization>::raw();}
+
+ private:
+  const int32_t srcStream_;
+};
+
 
 // Base class for GPU activities.
 // Can also be instantiated directly.

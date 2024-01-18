@@ -2113,18 +2113,18 @@ class TestDistributed(unittest.TestCase):
         dist_data0 = DistributedRunProfileData(profile0)
         self.assertTrue(profile0.has_communication)
         self.assertEqual(len(profile0.comm_node_list), 2)
-        self.assertEqual(profile0.steps_costs[0].costs, [105, 0, 0, 16, 0, 0, 79, 35, 235])
+        self.assertEqual(profile0.steps_costs[0].costs, [105, 0, 0, 75, 0, 0, 20, 35, 235])
 
         profile1 = parse_json_trace(json_content1, 'worker1')
         dist_data1 = DistributedRunProfileData(profile1)
         self.assertTrue(profile1.has_communication)
         self.assertEqual(len(profile1.comm_node_list), 2)
-        self.assertEqual(profile1.steps_costs[0].costs[3], 22)
+        self.assertEqual(profile1.steps_costs[0].costs[3], 74)
 
         loader = RunLoader('test_nccl', '', None)
         dist_profile = loader._process_distributed_profiles([dist_data0, dist_data1], 0)
-        self.assertEqual(dist_profile.steps_to_overlap['data']['0']['worker0'], [32, 73, 16, 114])
-        self.assertEqual(dist_profile.steps_to_overlap['data']['0']['worker1'], [152, 9, 22, 52])
+        self.assertEqual(dist_profile.steps_to_overlap['data']['0']['worker0'], [30, 75, 75, 55])
+        self.assertEqual(dist_profile.steps_to_overlap['data']['0']['worker1'], [121, 40, 74, 0])
         self.assertEqual(dist_profile.steps_to_wait['data']['0']['worker0'], [1074, 498])
         self.assertEqual(dist_profile.steps_to_wait['data']['0']['worker1'], [1074, 15])
         self.assertEqual(dist_profile.comm_ops['data']['worker0']['rows'],
@@ -2368,6 +2368,22 @@ class TestDistributed(unittest.TestCase):
                          [['gloo:broadcast', 3, 637440, 212480, 44, 15, 44, 15],
                           ['gloo:all_reduce', 2, 16392000, 8196000, 54, 27, 34, 17]])
 
+    def test_distributed_nccl_user_annotation_has_communication(self):
+        # tests https://github.com/pytorch/kineto/issues/640
+        json_content0 = """[
+          {
+            "ph": "X", "cat": "user_annotation", "name": "nccl:all_reduce", "pid": 128, "tid": 999,
+            "ts": 1686070155939447, "dur": 71,
+            "args": {
+              "Trace name": "PyTorch Profiler", "Trace iteration": 0,
+              "External id": 647,
+              "Profiler Event Index": 134
+            }
+          }
+        ]"""
+
+        profile0 = parse_json_trace(json_content0, 'worker0')
+        self.assertTrue(profile0.has_communication)
 
 class TestMemoryCurve(unittest.TestCase):
 

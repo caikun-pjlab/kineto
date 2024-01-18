@@ -86,9 +86,6 @@ struct ConfigDerivedState final {
   int64_t profileStartIteration() const { return profileStartIter_; }
   int64_t profileEndIteration() const { return profileEndIter_; }
   bool isProfilingByIteration() const { return profilingByIter_; }
-  bool profileWithPythonStack() const {
-    return profileWithStack_;
-  }
 
  private:
   std::set<ActivityType> profileActivityTypes_;
@@ -100,8 +97,13 @@ struct ConfigDerivedState final {
   int64_t profileStartIter_{-1};
   int64_t profileEndIter_{-1};
   bool profilingByIter_{false};
-  bool profileWithStack_{false};
 };
+
+namespace detail {
+  inline size_t hash_combine(size_t seed, size_t value) {
+    return seed ^ (value + 0x9e3779b9 + (seed << 6u) + (seed >> 2u));
+  }
+} // namespace detail
 
 class CuptiActivityProfiler {
  public:
@@ -270,14 +272,29 @@ class CuptiActivityProfiler {
       libkineto::CpuTraceBuffer& cpuTrace,
       ActivityLogger& logger);
 
+  inline bool hasDeviceResource(int device, int id) {
+    return resourceInfo_.find({device, id}) != resourceInfo_.end();
+  }
+
   // Create resource names for streams
   inline void recordStream(int device, int id, const char* postfix) {
-    if (resourceInfo_.find({device, id}) == resourceInfo_.end()) {
+    if (!hasDeviceResource(device, id)) {
       resourceInfo_.emplace(
-          std::make_pair(device, id),
-          ResourceInfo(
-              device, id, id, fmt::format(
-                  "stream {} {}", id, postfix)));
+        std::make_pair(device, id),
+        ResourceInfo(
+          device, id, id, fmt::format(
+            "stream {} {}", id, postfix)));
+    }
+  }
+
+  // Create resource names overall for device, id = -1
+  inline void recordDevice(int device) {
+    constexpr int id = -1;
+    if (!hasDeviceResource(device, id)) {
+      resourceInfo_.emplace(
+        std::make_pair(device, id),
+        ResourceInfo(
+          device, id, id, fmt::format("Device {}", device)));
     }
   }
 
@@ -309,8 +326,13 @@ class CuptiActivityProfiler {
       const CUpti_ActivityExternalCorrelation* correlation);
   void handleRuntimeActivity(
       const CUpti_ActivityAPI* activity, ActivityLogger* logger);
+  void handleDriverActivity(
+      const CUpti_ActivityAPI* activity, ActivityLogger* logger);
   void handleOverheadActivity(
       const CUpti_ActivityOverhead* activity, ActivityLogger* logger);
+  void handleCudaEventActivity(const CUpti_ActivityCudaEvent* activity);
+  void handleCudaSyncActivity(
+      const CUpti_ActivitySynchronization* activity, ActivityLogger* logger);
   void handleGpuActivity(const ITraceActivity& act,
       ActivityLogger* logger);
   template <class T>
@@ -403,6 +425,28 @@ class CuptiActivityProfiler {
 
   // span name -> iteration count
   std::map<std::string, int> iterationCountMap_;
+
+  struct DevStream {
+    int64_t ctx = 0;
+    int64_t stream = 0;
+    bool operator==(const DevStream& other) const {
+      return (this->ctx == other.ctx) && (this->stream == other.stream);
+    }
+  };
+
+  struct DevStreamHash {
+  	std::size_t operator()(const DevStream& c) const {
+  		return detail::hash_combine(
+        std::hash<int64_t>()(c.ctx),
+        std::hash<int64_t>()(c.stream)
+      );
+  	}
+  };
+
+  // This set tracks the (device, cuda streams) observed in the trace
+  // doing CUDA kernels/memcopies. This prevents emitting CUDA sync
+  // events on streams with no activity.
+  std::unordered_set<DevStream, DevStreamHash> seenDeviceStreams_;
 
   // Buffers where trace data is stored
   std::unique_ptr<ActivityBuffers> traceBuffers_;

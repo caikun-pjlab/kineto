@@ -11,10 +11,12 @@
 #include <fmt/format.h>
 #include <time.h>
 #include <atomic>
+#include <functional>
 #include <iomanip>
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 #include <limits>
 
@@ -45,6 +47,41 @@
 using namespace std::chrono;
 using std::string;
 
+struct CtxEventPair {
+  uint32_t ctx = 0;
+  uint32_t eventId = 0;
+
+  bool operator==(const CtxEventPair& other) const {
+    return (this->ctx == other.ctx) && (this->eventId == other.eventId);
+  }
+};
+
+template<>
+struct std::hash<CtxEventPair> {
+  std::size_t operator()(const CtxEventPair& c) const {
+    return KINETO_NAMESPACE::detail::hash_combine(
+      std::hash<uint32_t>()(c.ctx),
+      std::hash<uint32_t>()(c.eventId)
+    );
+  }
+};
+
+namespace {
+
+// Map (ctx, eventId) -> stream that recorded the cudaEvent
+std::unordered_map<CtxEventPair, uint32_t>& waitEventMap() {
+  static std::unordered_map<CtxEventPair, uint32_t> waitEventMap_;
+  return waitEventMap_;
+}
+
+// Map ctx -> deviceId
+std::unordered_map<uint32_t, uint32_t>& ctxToDeviceId() {
+  static std::unordered_map<uint32_t, uint32_t> ctxToDeviceId_;
+  return ctxToDeviceId_;
+};
+
+}
+
 namespace KINETO_NAMESPACE {
 
 ConfigDerivedState::ConfigDerivedState(const Config& config) {
@@ -60,7 +97,6 @@ ConfigDerivedState::ConfigDerivedState(const Config& config) {
     profileEndIter_ = (std::numeric_limits<decltype(profileEndIter_)>::max)();
     profileEndTime_ = profileStartTime_ + config.activitiesDuration();
   }
-  profileWithStack_ = config.isPythonStackTraceEnabled();
 }
 
 bool ConfigDerivedState::canStart(
@@ -398,6 +434,32 @@ void CuptiActivityProfiler::handleRuntimeActivity(
   runtime_activity.log(*logger);
 }
 
+void CuptiActivityProfiler::handleDriverActivity(
+    const CUpti_ActivityAPI* activity,
+    ActivityLogger* logger) {
+  // we only want to collect cuLaunchKernel events, for triton kernel launches
+  if (activity->cbid != CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
+    return;
+  }
+  VLOG(2) << activity->correlationId
+          << ": CUPTI_ACTIVITY_KIND_DRIVER, cbid=" << activity->cbid
+          << " tid=" << activity->threadId;
+  int32_t tid = activity->threadId;
+  const auto& it = resourceInfo_.find({processId(), tid});
+  if (it != resourceInfo_.end()) {
+    tid = it->second.id;
+  }
+  const ITraceActivity* linked =
+      linkedActivity(activity->correlationId, cpuCorrelationMap_);
+  const auto& runtime_activity =
+      traceBuffers_->addActivityWrapper(DriverActivity(activity, linked, tid));
+  checkTimestampOrder(&runtime_activity);
+  if (outOfRange(runtime_activity)) {
+    return;
+  }
+  runtime_activity.log(*logger);
+}
+
 void CuptiActivityProfiler::handleOverheadActivity(
     const CUpti_ActivityOverhead* activity,
     ActivityLogger* logger) {
@@ -414,6 +476,74 @@ void CuptiActivityProfiler::handleOverheadActivity(
     return;
   }
   overhead_activity.log(*logger);
+}
+
+
+int32_t getStreamForWaitEvent(uint32_t ctx, uint32_t eventId) {
+  auto key = CtxEventPair{ctx, eventId};
+  auto it = waitEventMap().find(key);
+  if (it != waitEventMap().end()) {
+    return it->second;
+  }
+  return -1;
+}
+
+void CuptiActivityProfiler::handleCudaEventActivity(
+    const CUpti_ActivityCudaEvent* activity) {
+  VLOG(2) << ": CUPTI_ACTIVITY_KIND_CUDA_EVENT"
+          << " corrId=" << activity->correlationId
+          << " eventId=" << activity->eventId
+          << " streamId=" << activity->streamId
+          << " contextId=" << activity->contextId;
+
+  // Update the stream the cudaEvent was last recorded on
+  auto key = CtxEventPair{activity->contextId, activity->eventId};
+  waitEventMap()[key] = activity->streamId;
+}
+
+void CuptiActivityProfiler::handleCudaSyncActivity(
+    const CUpti_ActivitySynchronization* activity,
+    ActivityLogger* logger) {
+  VLOG(2) << ": CUPTI_ACTIVITY_KIND_SYNCHRONIZATION"
+          << " type=" << syncTypeString(activity->type)
+          << " corrId=" << activity->correlationId
+          << " streamId=" << activity->streamId
+          << " eventId=" << activity->cudaEventId
+          << " contextId=" << activity->contextId;
+
+  if (!config_->activitiesCudaSyncWaitEvents() && isEventSync(activity->type)) {
+    return;
+  }
+
+  auto device_id = contextIdtoDeviceId(activity->contextId);
+
+  // Event Sync events tend to be noisy, only pass these events if
+  // there was some GPU kernel/memcopy/memset observed on it till now.
+  if (isEventSync(activity->type) &&
+      (seenDeviceStreams_.find({device_id, activity->streamId}) ==
+       seenDeviceStreams_.end())) {
+    VLOG(2) << "Skipping Event Sync (corrId=" << activity->correlationId
+            << ") as no kernels have run yet on stream = " << activity->streamId;
+    return;
+  }
+
+  if (int32_t(activity->streamId) != -1) {
+    recordStream(device_id, activity->streamId, "");
+  } else {
+    recordDevice(device_id);
+  }
+
+  const ITraceActivity* linked =
+      linkedActivity(activity->correlationId, cpuCorrelationMap_);
+  int32_t src_stream = getStreamForWaitEvent(
+      activity->contextId, activity->cudaEventId);
+  const auto& cuda_sync_activity = traceBuffers_->addActivityWrapper(
+      CudaSyncActivity(activity, linked, src_stream));
+
+  if (outOfRange(cuda_sync_activity)) {
+    return;
+  }
+  cuda_sync_activity.log(*logger);
 }
 
 inline void CuptiActivityProfiler::updateGpuNetSpan(
@@ -474,6 +604,8 @@ inline void CuptiActivityProfiler::handleGpuActivity(
   checkTimestampOrder(&act);
   VLOG(2) << act.correlationId() << ": " << act.name();
   recordStream(act.deviceId(), act.resourceId(), "");
+  seenDeviceStreams_.insert({act.deviceId(), act.resourceId()});
+
   act.log(*logger);
   updateGpuNetSpan(act);
   if (derivedConfig_->profileActivityTypes().count(
@@ -513,6 +645,19 @@ inline void CuptiActivityProfiler::handleGpuActivity(
   handleGpuActivity(gpu_activity, logger);
 }
 
+
+template <class T>
+inline void updateCtxToDeviceId(const T* act) {
+  if (ctxToDeviceId().count(act->contextId) == 0) {
+    ctxToDeviceId()[act->contextId] = act->deviceId;
+  }
+}
+
+uint32_t contextIdtoDeviceId(uint32_t contextId) {
+  auto it = ctxToDeviceId().find(contextId);
+  return it != ctxToDeviceId().end() ? it->second : 0;
+}
+
 void CuptiActivityProfiler::handleCuptiActivity(
     const CUpti_Activity* record,
     ActivityLogger* logger) {
@@ -528,6 +673,16 @@ void CuptiActivityProfiler::handleCuptiActivity(
     case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL:
       handleGpuActivity(
           reinterpret_cast<const CUpti_ActivityKernel4*>(record), logger);
+      updateCtxToDeviceId(
+          reinterpret_cast<const CUpti_ActivityKernel4*>(record));
+      break;
+    case CUPTI_ACTIVITY_KIND_SYNCHRONIZATION:
+      handleCudaSyncActivity(
+          reinterpret_cast<const CUpti_ActivitySynchronization*>(record), logger);
+      break;
+    case CUPTI_ACTIVITY_KIND_CUDA_EVENT:
+      handleCudaEventActivity(
+          reinterpret_cast<const CUpti_ActivityCudaEvent*>(record));
       break;
     case CUPTI_ACTIVITY_KIND_MEMCPY:
       handleGpuActivity(
@@ -544,6 +699,10 @@ void CuptiActivityProfiler::handleCuptiActivity(
     case CUPTI_ACTIVITY_KIND_OVERHEAD:
       handleOverheadActivity(
           reinterpret_cast<const CUpti_ActivityOverhead*>(record), logger);
+      break;
+    case CUPTI_ACTIVITY_KIND_DRIVER:
+      handleDriverActivity(
+          reinterpret_cast<const CUpti_ActivityAPI*>(record), logger);
       break;
     default:
       LOG(WARNING) << "Unexpected activity type: " << record->kind;
@@ -660,7 +819,12 @@ void CuptiActivityProfiler::configure(
   }
 
   if (libkineto::api().client()) {
-    libkineto::api().client()->warmup(config_->isOpInputsCollectionEnabled());
+    libkineto::api().client()->prepare(
+      config_->isReportInputShapesEnabled(),
+      config_->isProfileMemoryEnabled(),
+      config_->isWithStackEnabled(),
+      config_->isWithFlopsEnabled(),
+      config_->isWithModulesEnabled());
   }
 
   if (derivedConfig_->isProfilingByIteration()) {
@@ -788,7 +952,6 @@ const time_point<system_clock> CuptiActivityProfiler::performRunLoopStep(
         }
         startTrace(now);
         if (libkineto::api().client()) {
-          libkineto::api().client()->set_withstack(derivedConfig_->profileWithPythonStack());
           libkineto::api().client()->start();
         }
         if (nextWakeupTime > derivedConfig_->profileEndTime()) {
@@ -943,6 +1106,7 @@ void CuptiActivityProfiler::resetTraceData() {
   gpuUserEventMap_.clear();
   traceSpans_.clear();
   clientActivityTraceMap_.clear();
+  seenDeviceStreams_.clear();
   traceBuffers_ = nullptr;
   metadata_.clear();
   sessions_.clear();

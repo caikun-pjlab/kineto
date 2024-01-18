@@ -26,6 +26,8 @@
 
 #include "mpi.h"
 #include "kineto/libkineto/stress_test/random_ops_stress_test.cuh"
+#include "kineto/libkineto/stress_test/tensor_cache.cuh"
+#include "kineto/libkineto/stress_test/utils.h"
 
 using namespace kineto_stress_test;
 
@@ -64,6 +66,11 @@ void read_inputs_from_json(std::string sJsonFile, stress_test_args *test_args,
     test_args->sz_nccl_buff_KB = (uint32_t)jsonTestArgs["sz_nccl_buff_KB"].asInt();
     test_args->num_iters_nccl_sync = (uint32_t)jsonTestArgs["num_iters_nccl_sync"].asInt();
     test_args->pre_alloc_streams = (bool)jsonTestArgs["pre_alloc_streams"].asBool();
+    test_args->use_memcpy_stream = (bool)jsonTestArgs["use_memcpy_stream"].asBool();
+    test_args->use_uvm_stream = (bool)jsonTestArgs["use_uvm_stream"].asBool();
+    test_args->monitor_mem_usage = (bool)jsonTestArgs["monitor_mem_usage"].asBool();
+    test_args->trace_length_us = (uint32_t)jsonTestArgs["trace_length_us"].asInt();
+    test_args->cupti_buffer_mb = (uint32_t)jsonTestArgs["cupti_buffer_mb"].asInt();
 
     folly::dynamic cacheArgs = sJsonParsed["cache_args"];
     cache_args->sz_cache_KB = (uint32_t)cacheArgs["sz_cache_KB"].asInt();
@@ -79,14 +86,16 @@ void read_inputs_from_json(std::string sJsonFile, stress_test_args *test_args,
   }
 }
 
-void trace_collection_thread() {
-  useconds_t t_trace_length_us = 2000000;
+void trace_collection_thread(uint32_t trace_length_us,
+  uint32_t cupti_buffer_mb) {
 
-  // Configure CUPTI buffer sizes
-  // size_t attrValue = 0, attrValueSize = sizeof(size_t);
-  // attrValue = 3 * 1024 * 1024;
-  // cuptiActivitySetAttribute(CUPTI_ACTIVITY_ATTR_DEVICE_BUFFER_SIZE,
-  //    &attrValueSize, &attrValue);
+  if (cupti_buffer_mb > 0) {
+    // Configure CUPTI buffer sizes
+    size_t attrValue = 0, attrValueSize = sizeof(size_t);
+    attrValue = (size_t)(cupti_buffer_mb * 1024 * 1024);
+    cuptiActivitySetAttribute(CUPTI_ACTIVITY_ATTR_DEVICE_BUFFER_SIZE,
+      &attrValueSize, &attrValue);
+  }
 
   // Config Kineto
   std::set<libkineto::ActivityType> types = {
@@ -103,7 +112,7 @@ void trace_collection_thread() {
 
   // Collect the trace
   profiler.startTrace();
-  usleep(t_trace_length_us);
+  usleep(trace_length_us);
   auto trace = profiler.stopTrace();
 
   // Save the trace
@@ -155,6 +164,61 @@ void run_parallel_stress_test(stress_test_args test_args) {
   }
 }
 
+void create_cuda_streams(stress_test_args& test_args) {
+  test_args.compute_streams = (cudaStream_t*)malloc(test_args.num_cuda_streams *
+    test_args.num_workers * sizeof(cudaStream_t));
+  for (uint32_t i = 0; i < test_args.num_cuda_streams * test_args.num_workers; ++i) {
+    checkCudaStatus(cudaStreamCreateWithFlags(test_args.compute_streams + i, cudaStreamNonBlocking), __LINE__);
+  }
+
+  if (test_args.use_memcpy_stream) {
+    test_args.memcpy_streams = (cudaStream_t*)malloc(test_args.num_workers * sizeof(cudaStream_t));
+    for (uint32_t i = 0; i < test_args.num_workers; ++i) {
+      checkCudaStatus(cudaStreamCreateWithFlags(test_args.memcpy_streams + i, cudaStreamNonBlocking), __LINE__);
+    }
+  }
+
+  if (test_args.use_uvm_stream) {
+    test_args.uvm_streams = (cudaStream_t*)malloc(test_args.num_workers * sizeof(cudaStream_t));
+    for (uint32_t i = 0; i < test_args.num_workers; ++i) {
+      checkCudaStatus(cudaStreamCreateWithFlags(test_args.uvm_streams + i, cudaStreamNonBlocking), __LINE__);
+    }
+  }
+}
+
+void cleanup_cuda_streams(stress_test_args& test_args) {
+  for (int i = 0; i < test_args.num_cuda_streams * test_args.num_workers; ++i) {
+    checkCudaStatus(cudaStreamSynchronize(test_args.compute_streams[i]), __LINE__);
+    checkCudaStatus(cudaStreamDestroy(test_args.compute_streams[i]), __LINE__);
+  }
+
+  if (test_args.compute_streams) {
+    free(test_args.compute_streams);
+  }
+
+  if (test_args.use_memcpy_stream) {
+    for (int i = 0; i < test_args.num_workers; ++i) {
+      checkCudaStatus(cudaStreamSynchronize(test_args.memcpy_streams[i]), __LINE__);
+      checkCudaStatus(cudaStreamDestroy(test_args.memcpy_streams[i]), __LINE__);
+    }
+
+    if (test_args.memcpy_streams) {
+      free(test_args.memcpy_streams);
+    }
+  }
+
+  if (test_args.use_uvm_stream) {
+    for (int i = 0; i < test_args.num_workers; ++i) {
+      checkCudaStatus(cudaStreamSynchronize(test_args.uvm_streams[i]), __LINE__);
+      checkCudaStatus(cudaStreamDestroy(test_args.uvm_streams[i]), __LINE__);
+    }
+
+    if (test_args.uvm_streams) {
+      free(test_args.uvm_streams);
+    }
+  }
+}
+
 int main(int argc, char *argv[]) {
 
   /////////////////////////////////////////////////////////////////////////////
@@ -170,6 +234,12 @@ int main(int argc, char *argv[]) {
 
   tensor_cache_args cache_args;
   stress_test_args test_args;
+
+  if (argc < 2) {
+    std::cout << "Please specify input JSON file." << std::endl;
+    std::cout << "Usage: " << argv[0] << " <json_file>" << std::endl;
+    return -1;
+  }
 
   // Parse input json file
   read_inputs_from_json(argv[1], &test_args, &cache_args);
@@ -215,11 +285,7 @@ int main(int argc, char *argv[]) {
 
   // Pre-allocate CUDA streams
   if (test_args.pre_alloc_streams) {
-    test_args.cuda_streams = (cudaStream_t*)malloc(test_args.num_cuda_streams *
-        test_args.num_workers * sizeof(cudaStream_t));
-    for (uint32_t i = 0; i < test_args.num_cuda_streams * test_args.num_workers; ++i) {
-      checkCudaStatus(cudaStreamCreateWithFlags(test_args.cuda_streams + i, cudaStreamNonBlocking), __LINE__);
-    }
+    create_cuda_streams(test_args);
   }
 
   std::thread uvm_init_thread;
@@ -264,7 +330,7 @@ int main(int argc, char *argv[]) {
   run_parallel_stress_test(test_args);
   clock_t t_stop = clock();
   double t_no_trace = (double)(t_stop - t_start) / 1e+3;
-  std::cout << "Rank " << test_args.rank << " no kineto test completed. Duration (ms) = "
+  std::cout << "Rank " << test_args.rank << " before kineto tracing. Duration (ms) = "
       << t_no_trace << std::endl;
 
   // Re-generate tensor cache values
@@ -273,35 +339,41 @@ int main(int argc, char *argv[]) {
     MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
   }
 
-  // Tracing thread
-  std::thread kineto_thread;
+  // If configured we are collecting a few traces
+  if (test_args.trace_length_us > 0) {
+    // Tracing thread
+    std::thread kineto_thread;
 
-  // We are gradually increasing the GPU memory usage so that we have GPU traces being
-  // collected while we are almost out-of-memory. This is an attempt to expose errors
-  // that we often see in our fleet like: illegal instruction, uncorrectable NVLink
-  // error, etc.
+    // We are gradually increasing the GPU memory usage so that we have GPU traces being
+    // collected while we are almost out-of-memory. This is an attempt to expose errors
+    // that we often see in our fleet like: illegal instruction, uncorrectable NVLink
+    // error, etc.
 
-  for (uint32_t idx = 0; idx < cache_args.num_increments; ++idx) {
-    // Run with kineto tracing
-    t_start = clock();
-    kineto_thread = std::thread(trace_collection_thread);
-    run_parallel_stress_test(test_args);
-    kineto_thread.join();
-    t_stop = clock();
-    double t_with_trace = (double)(t_stop - t_start) / 1e+3;
+    for (uint32_t idx = 0; idx < cache_args.num_increments; ++idx) {
+      // Run with kineto tracing
+      t_start = clock();
+      kineto_thread = std::thread(trace_collection_thread, test_args.trace_length_us,
+        test_args.cupti_buffer_mb);
+      run_parallel_stress_test(test_args);
+      kineto_thread.join();
+      t_stop = clock();
+      double t_with_trace = (double)(t_stop - t_start) / 1e+3;
 
-    std::cout << "Rank " << test_args.rank << " kineto run " << idx
-        << " completed. Used GPU memory (MB) = " << sz_memory_pool_KB / 1024
-        << "; Duration (ms) = " << t_with_trace << std::endl;
+      std::cout << "Rank " << test_args.rank << " kineto run " << idx
+          << " completed. Used GPU memory (MB) = " << sz_memory_pool_KB / 1024
+          << "; Duration (ms) = " << t_with_trace << std::endl;
 
-    // The first run is the default run
-    add_pairs_to_tensor_cache(cache_args, cache_args.num_pairs_per_increment);
-  }
+      // The first run is the default run
+      add_pairs_to_tensor_cache(cache_args, cache_args.num_pairs_per_increment);
+    }
 
-  // Re-generate tensor cache values
-  re_initialize_buffer_values();
-  if (test_args.is_multi_rank) {
-    MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
+    // Re-generate tensor cache values
+    re_initialize_buffer_values();
+    if (test_args.is_multi_rank) {
+      MPICHECK(MPI_Barrier(MPI_COMM_WORLD));
+    }
+  } else {
+    std::cout << "Rank " << test_args.rank << " has tracing disabled (trace_length = 0)!" << std::endl;
   }
 
   // Run again after kineto tracing
@@ -309,8 +381,9 @@ int main(int argc, char *argv[]) {
   run_parallel_stress_test(test_args);
   t_stop = clock();
   double t_after_trace = (double)(t_stop - t_start) / 1e+3;
-  std::cout << "Rank " << test_args.rank << " after kineto test completed. Duration (ms) = "
-      << t_after_trace << std::endl;
+  std::cout << "Rank " << test_args.rank << " after kineto tracing. Duration (ms) = "
+      << t_after_trace << "; Kernel Launch Throughput = " << (double)test_args.num_operations / (t_after_trace / 1000)
+      << " kernels/second" << std::endl;
 
   // Final barrier before destroying everything
   if (test_args.is_multi_rank) {
@@ -319,13 +392,7 @@ int main(int argc, char *argv[]) {
 
   // Destroy CUDA streams
   if (test_args.pre_alloc_streams) {
-    for (int i = 0; i < test_args.num_cuda_streams * test_args.num_workers; ++i) {
-      checkCudaStatus(cudaStreamSynchronize(test_args.cuda_streams[i]), __LINE__);
-      checkCudaStatus(cudaStreamDestroy(test_args.cuda_streams[i]), __LINE__);
-    }
-    if (test_args.cuda_streams) {
-      free(test_args.cuda_streams);
-    }
+    cleanup_cuda_streams(test_args);
   }
 
   // Free the tensor cache on the GPU
