@@ -17,6 +17,7 @@ struct ActivityTypeName {
   ActivityType type;
 };
 
+#if DIPU_TORCH_VERSION == 20000
 static constexpr std::array<ActivityTypeName, activityTypeCount + 1> map{{
     {"cpu_op", ActivityType::CPU_OP},
     {"user_annotation", ActivityType::USER_ANNOTATION},
@@ -34,6 +35,30 @@ static constexpr std::array<ActivityTypeName, activityTypeCount + 1> map{{
     {"hpu_op", ActivityType::HPU_OP},
     {"ENUM_COUNT", ActivityType::ENUM_COUNT}
 }};
+#else
+static constexpr std::array<ActivityTypeName, activityTypeCount + 1> map{{
+    {"cpu_op", ActivityType::CPU_OP},
+    {"user_annotation", ActivityType::USER_ANNOTATION},
+    {"gpu_user_annotation", ActivityType::GPU_USER_ANNOTATION},
+    {"gpu_memcpy", ActivityType::GPU_MEMCPY},
+    {"gpu_memset", ActivityType::GPU_MEMSET},
+    {"kernel", ActivityType::CONCURRENT_KERNEL},
+    {"external_correlation", ActivityType::EXTERNAL_CORRELATION},
+    {"cuda_runtime", ActivityType::CUDA_RUNTIME},
+    {"cuda_driver", ActivityType::CUDA_DRIVER},
+    {"cpu_instant_event", ActivityType::CPU_INSTANT_EVENT},
+    {"python_function", ActivityType::PYTHON_FUNCTION},
+    {"overhead", ActivityType::OVERHEAD},
+    {"cuda_sync", ActivityType::CUDA_SYNC},
+    {"glow_runtime", ActivityType::GLOW_RUNTIME},
+    {"mtia_runtime", ActivityType::MTIA_RUNTIME},
+    {"cuda_profiler_range", ActivityType::CUDA_PROFILER_RANGE},
+    {"mtia_ccp_events", ActivityType::MTIA_CCP_EVENTS},
+    {"hpu_op", ActivityType::HPU_OP},
+    {"xpu_runtime", ActivityType::XPU_RUNTIME},
+    {"ENUM_COUNT", ActivityType::ENUM_COUNT}
+}};
+#endif
 
 static constexpr bool matchingOrder(int idx = 0) {
   return map[idx].type == ActivityType::ENUM_COUNT ||
