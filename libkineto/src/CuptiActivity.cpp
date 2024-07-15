@@ -38,11 +38,16 @@ inline bool isEventSync(CUpti_ActivitySynchronizationType type) {
 }
 
 inline std::string eventSyncInfo(
-    const CUpti_ActivitySynchronization& act, int32_t srcStream) {
+    const CUpti_ActivitySynchronization& act,
+    int32_t srcStream,
+    int32_t srcCorrId
+    ) {
   return fmt::format(R"JSON(
       "wait_on_stream": {},
+      "wait_on_cuda_event_record_corr_id": {},
       "wait_on_cuda_event_id": {},)JSON",
       srcStream,
+      srcCorrId,
       act.cudaEventId
   );
 }
@@ -75,7 +80,7 @@ inline const std::string CudaSyncActivity::metadataJson() const {
       "stream": {}, "correlation": {},
       "device": {}, "context": {})JSON",
       syncTypeString(sync.type),
-      isEventSync(raw().type) ? eventSyncInfo(raw(), srcStream_) : "",
+      isEventSync(raw().type) ? eventSyncInfo(raw(), srcStream_, srcCorrId_) : "",
       sync.streamId, sync.correlationId,
       deviceId(), sync.contextId);
   // clang-format on
@@ -243,7 +248,7 @@ inline bool RuntimeActivity::flowStart() const {
       activity_.cbid == CUPTI_RUNTIME_TRACE_CBID_cudaDeviceSynchronize_v3020 ||
       activity_.cbid == CUPTI_RUNTIME_TRACE_CBID_cudaStreamWaitEvent_v3020;
 
-#if defined(CUPTI_API_VERSION) && CUPTI_API_VERSION >= 17
+#if defined(CUPTI_API_VERSION) && CUPTI_API_VERSION >= 18
   should_correlate |=
       activity_.cbid == CUPTI_RUNTIME_TRACE_CBID_cudaLaunchKernelExC_v11060;
 #endif

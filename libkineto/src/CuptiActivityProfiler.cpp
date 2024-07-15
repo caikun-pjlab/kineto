@@ -13,6 +13,7 @@
 #include <atomic>
 #include <functional>
 #include <iomanip>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -66,11 +67,18 @@ struct std::hash<CtxEventPair> {
   }
 };
 
+struct WaitEventInfo {
+  // CUDA stream that the CUDA event was recorded on
+  uint32_t stream;
+  // Correlation ID of the cudaEventRecord event
+  uint32_t correlationId;
+};
+
 namespace {
 
-// Map (ctx, eventId) -> stream that recorded the cudaEvent
-std::unordered_map<CtxEventPair, uint32_t>& waitEventMap() {
-  static std::unordered_map<CtxEventPair, uint32_t> waitEventMap_;
+// Map (ctx, eventId) -> (stream, corr Id) that recorded the CUDA event
+std::unordered_map<CtxEventPair, WaitEventInfo>& waitEventMap() {
+  static std::unordered_map<CtxEventPair, WaitEventInfo> waitEventMap_;
   return waitEventMap_;
 }
 
@@ -148,6 +156,20 @@ bool ConfigDerivedState::isCollectionDone(
     return currentIter >= profileEndIter_;
   }
   return false;
+}
+
+std::ostream& operator<<(std::ostream& oss, const CuptiActivityProfiler::ErrorCounts& ecs) {
+  oss << "Out-of-range = " << ecs.out_of_range_events
+      << ", Blocklisted runtime = " << ecs.blocklisted_runtime_events
+      << ", Invalid ext correlations = " << ecs.invalid_external_correlation_events
+      << ", CPU GPU out-of-order = " << ecs.gpu_and_cpu_op_out_of_order
+#if defined(HAS_CUPTI) || defined(HAS_ROCTRACER)
+      << ", Unexpected CUDA events = " << ecs.unexepected_cuda_events
+      << ", CUPTI stopped early? = " << ecs.cupti_stopped_early;
+#else
+      ;
+#endif // HAS_CUPTI || HAS_ROCTRACER
+  return oss;
 }
 
 void CuptiActivityProfiler::transferCpuTrace(
@@ -269,6 +291,8 @@ void CuptiActivityProfiler::processTraceInternal(ActivityLogger& logger) {
     session->processTrace(logger);
   }
 
+  LOG(INFO) << "Error info: " << ecs_;
+
   finalizeTrace(*config_, logger);
 }
 
@@ -322,6 +346,7 @@ inline void CuptiActivityProfiler::handleCorrelationActivity(
   } else {
     LOG(WARNING)
         << "Invalid CUpti_ActivityExternalCorrelation sent to handleCuptiActivity";
+    ecs_.invalid_external_correlation_events++;
   }
 }
 #endif // HAS_CUPTI
@@ -387,6 +412,7 @@ inline bool CuptiActivityProfiler::outOfRange(const ITraceActivity& act) {
             << " (" << act.timestamp() << " < " << captureWindowStartTime_
             << " or " << (act.timestamp() + act.duration()) << " > "
             << captureWindowEndTime_;
+    ecs_.out_of_range_events++;
   }
   return out_of_range;
 }
@@ -397,12 +423,10 @@ inline static bool isBlockListedRuntimeCbid(CUpti_CallbackId cbid) {
   if (cbid == CUPTI_RUNTIME_TRACE_CBID_cudaGetDevice_v3020 ||
       cbid == CUPTI_RUNTIME_TRACE_CBID_cudaSetDevice_v3020 ||
       cbid == CUPTI_RUNTIME_TRACE_CBID_cudaGetLastError_v3020 ||
-      // Don't care about cudaEvents
+      // Support cudaEventRecord and cudaEventSynchronize, revisit if others are needed
       cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventCreate_v3020 ||
       cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventCreateWithFlags_v3020 ||
-      cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventRecord_v3020 ||
-      cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventDestroy_v3020 ||
-      cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventSynchronize_v3020) {
+      cbid == CUPTI_RUNTIME_TRACE_CBID_cudaEventDestroy_v3020) {
     return true;
   }
 
@@ -413,6 +437,7 @@ void CuptiActivityProfiler::handleRuntimeActivity(
     const CUpti_ActivityAPI* activity,
     ActivityLogger* logger) {
   if (isBlockListedRuntimeCbid(activity->cbid)) {
+    ecs_.blocklisted_runtime_events++;
     return;
   }
   VLOG(2) << activity->correlationId
@@ -439,6 +464,7 @@ void CuptiActivityProfiler::handleDriverActivity(
     ActivityLogger* logger) {
   // we only want to collect cuLaunchKernel events, for triton kernel launches
   if (activity->cbid != CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel) {
+    // XXX should we count other driver events?
     return;
   }
   VLOG(2) << activity->correlationId
@@ -479,13 +505,14 @@ void CuptiActivityProfiler::handleOverheadActivity(
 }
 
 
-int32_t getStreamForWaitEvent(uint32_t ctx, uint32_t eventId) {
+std::optional<WaitEventInfo> getWaitEventInfo(
+    uint32_t ctx, uint32_t eventId) {
   auto key = CtxEventPair{ctx, eventId};
   auto it = waitEventMap().find(key);
   if (it != waitEventMap().end()) {
     return it->second;
   }
-  return -1;
+  return std::nullopt;
 }
 
 void CuptiActivityProfiler::handleCudaEventActivity(
@@ -496,9 +523,9 @@ void CuptiActivityProfiler::handleCudaEventActivity(
           << " streamId=" << activity->streamId
           << " contextId=" << activity->contextId;
 
-  // Update the stream the cudaEvent was last recorded on
+  // Update the stream, corrID the cudaEvent was last recorded on
   auto key = CtxEventPair{activity->contextId, activity->eventId};
-  waitEventMap()[key] = activity->streamId;
+  waitEventMap()[key] = WaitEventInfo{activity->streamId, activity->correlationId};
 }
 
 void CuptiActivityProfiler::handleCudaSyncActivity(
@@ -535,10 +562,19 @@ void CuptiActivityProfiler::handleCudaSyncActivity(
 
   const ITraceActivity* linked =
       linkedActivity(activity->correlationId, cpuCorrelationMap_);
-  int32_t src_stream = getStreamForWaitEvent(
-      activity->contextId, activity->cudaEventId);
+  int32_t src_stream = -1, src_corrid = -1;
+
+  if (isEventSync(activity->type)) {
+    auto maybe_wait_event_info = getWaitEventInfo(
+        activity->contextId, activity->cudaEventId);
+    if (maybe_wait_event_info) {
+      src_stream = maybe_wait_event_info->stream;
+      src_corrid = maybe_wait_event_info->correlationId;
+    }
+  }
+
   const auto& cuda_sync_activity = traceBuffers_->addActivityWrapper(
-      CudaSyncActivity(activity, linked, src_stream));
+      CudaSyncActivity(activity, linked, src_stream, src_corrid));
 
   if (outOfRange(cuda_sync_activity)) {
     return;
@@ -592,6 +628,7 @@ void CuptiActivityProfiler::checkTimestampOrder(const ITraceActivity* act1) {
                              << act1->timestamp() - act2->timestamp() << "us"
                              << " Name: " << act2->name() << " Device: " << act2->deviceId()
                              << " Stream: " << act2->resourceId();
+    ecs_.gpu_and_cpu_op_out_of_order++;
   }
 }
 
@@ -706,6 +743,7 @@ void CuptiActivityProfiler::handleCuptiActivity(
       break;
     default:
       LOG(WARNING) << "Unexpected activity type: " << record->kind;
+      ecs_.unexepected_cuda_events++;
       break;
   }
 }
@@ -723,8 +761,7 @@ void CuptiActivityProfiler::configureChildProfilers() {
           derivedConfig_->profileStartTime().time_since_epoch())
           .count();
   for (auto& profiler : profilers_) {
-    LOG(INFO) << "Running child profiler " << profiler->name() << " for "
-              << derivedConfig_->profileDuration().count() << " ms";
+    LOG(INFO) << "Evaluating whether to run child profiler = " << profiler->name();
     auto session = profiler->configure(
         start_time_ms,
         derivedConfig_->profileDuration().count(),
@@ -976,10 +1013,14 @@ const time_point<system_clock> CuptiActivityProfiler::performRunLoopStep(
         LOG(INFO) << "Tracing complete.";
         VLOG_IF(1, currentIter > 0) << "This state change was invoked by application's step() call";
 
-        // FIXME: Need to communicate reason for stopping on errors
         if (libkineto::api().client()) {
           libkineto::api().client()->stop();
         }
+
+#if defined(HAS_CUPTI) || defined(HAS_ROCTRACER)
+        ecs_.cupti_stopped_early = cupti_.stopCollection;
+#endif // HAS_CUPTI || HAS_ROCTRACER
+
         std::lock_guard<std::mutex> guard(mutex_);
         stopTraceInternal(now);
         VLOG_IF(0, collection_done) << "Reached profile end time";
@@ -1111,6 +1152,7 @@ void CuptiActivityProfiler::resetTraceData() {
   metadata_.clear();
   sessions_.clear();
   resourceOverheadCount_ = 0;
+  ecs_ = ErrorCounts{};
 #if !USE_GOOGLE_LOG
   Logger::removeLoggerObserver(loggerCollectorMetadata_.get());
 #endif // !USE_GOOGLE_LOG
